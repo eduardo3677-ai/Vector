@@ -64,8 +64,10 @@ struct UniqueFd {
 
 class Logcat {
 public:
-    Logcat(JNIEnv* env, jobject thiz, jmethodID method)
-        : env_(env), thiz_(thiz), refresh_fd_method_(method) {}
+    Logcat(JNIEnv* env, jobject thiz, jmethodID refresh_fd_method, jmethodID close_fd_method,
+           bool verbose_enabled)
+        : env_(env), thiz_(thiz), refresh_fd_method_(refresh_fd_method),
+          close_fd_method_(close_fd_method), verbose_enabled_(verbose_enabled) {}
 
     [[noreturn]] void Run();
 
@@ -79,6 +81,7 @@ private:
     JNIEnv* env_;
     jobject thiz_;
     jmethodID refresh_fd_method_;
+    jmethodID close_fd_method_;
 
     UniqueFd modules_fd_{};
     size_t modules_written_ = 0;
@@ -89,7 +92,7 @@ private:
     size_t verbose_part_ = 0;
 
     pid_t my_pid_ = getpid();
-    bool verbose_enabled_ = true;
+    bool verbose_enabled_;
 };
 
 // 'Scatter-Gather' I/O (writev)
@@ -198,11 +201,18 @@ void Logcat::ProcessBuffer(struct log_msg* buf) {
     // Feedback Loop: The daemon listens to its own Logcat output for remote commands.
     if (entry.pid == my_pid_ && tag == "VectorLogcat"sv) {
         std::string_view msg(entry.message, entry.messageLen);
+        // Android's logger includes a trailing NUL in messageLen on some releases. Commands are
+        // exact tokens, so normalize transport terminators before comparing them.
+        while (!msg.empty() && (msg.back() == '\0' || msg.back() == '\n')) msg.remove_suffix(1);
         if (msg == "!!start_verbose!!"sv) {
             verbose_enabled_ = true;
+            if (verbose_fd_ < 0) RefreshFd(true);
             verbose_written_ += FastWrite(entry, verbose_fd_);
         } else if (msg == "!!stop_verbose!!"sv) {
             verbose_enabled_ = false;
+            verbose_written_ = 0;
+            env_->CallVoidMethod(thiz_, close_fd_method_, JNI_TRUE);
+            verbose_fd_.reset(-1);
         } else if (msg == "!!refresh_modules!!"sv) {
             RefreshFd(false);
         } else if (msg == "!!refresh_verbose!!"sv) {
@@ -213,7 +223,7 @@ void Logcat::ProcessBuffer(struct log_msg* buf) {
 
 void Logcat::Run() {
     size_t tail = 0;  // Start with no history
-    RefreshFd(true);
+    if (verbose_enabled_) RefreshFd(true);
     RefreshFd(false);
 
     while (true) {
@@ -247,15 +257,17 @@ void Logcat::Run() {
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_org_matrix_vector_daemon_env_LogcatMonitor_runLogcat(JNIEnv* env, jobject thiz) {
+Java_org_matrix_vector_daemon_env_LogcatMonitor_runLogcat(
+    JNIEnv* env, jobject thiz, jboolean verbose_enabled) {
     auto clazz = lsplant::JNI_GetObjectClass(env, thiz);
-    auto method = lsplant::JNI_GetMethodID(env, clazz, "refreshFd", "(Z)I");
-    if (!method) {
+    auto refresh_fd_method = lsplant::JNI_GetMethodID(env, clazz, "refreshFd", "(Z)I");
+    auto close_fd_method = lsplant::JNI_GetMethodID(env, clazz, "closeFd", "(Z)V");
+    if (!refresh_fd_method || !close_fd_method) {
         // The wrapper has already logged and cleared the NoSuchMethodError. Running with a null
-        // method id would abort inside the first refresh instead of saying why.
-        LOGE("LogcatMonitor.refreshFd is missing; not starting the log reader");
+        // method id would abort inside the first refresh or stop request instead of saying why.
+        LOGE("LogcatMonitor file-descriptor methods are missing; not starting the log reader");
         return;
     }
-    Logcat daemon(env, thiz, method);
+    Logcat daemon(env, thiz, refresh_fd_method, close_fd_method, verbose_enabled == JNI_TRUE);
     daemon.Run();
 }

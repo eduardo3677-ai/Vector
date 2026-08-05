@@ -29,7 +29,7 @@ object LogcatMonitor {
   private var verboseFd = -1
   @Volatile private var isRunning = false
 
-  private external fun runLogcat()
+  private external fun runLogcat(verboseEnabled: Boolean)
 
   // Thread-safe LRU implementation for log files
   private class ThreadSafeLRU(private val maxEntries: Int = 10) {
@@ -90,13 +90,13 @@ object LogcatMonitor {
     }
   }
 
-  fun start() {
+  fun start(verboseEnabled: Boolean) {
     if (isRunning) return
     isRunning = true
     VectorDaemon.scope.launch {
       runCatching {
             Log.i(TAG, "Logcat daemon starting")
-            runLogcat() // Blocks until the native logcat process dies
+            runLogcat(verboseEnabled) // Blocks until the native logcat process dies
             Log.i(TAG, "Logcat daemon stopped")
           }
           .onFailure { Log.e(TAG, "Logcat crashed", it) }
@@ -146,7 +146,6 @@ object LogcatMonitor {
 
   fun checkLogFile() {
     if (modulesFd == -1) refresh(false)
-    if (verboseFd == -1) refresh(true)
   }
 
   @Suppress("unused") // Called via JNI
@@ -177,5 +176,10 @@ object LogcatMonitor {
           Log.w(TAG, "refreshFd failed", it)
         }
         .getOrDefault(-1)
+  }
+
+  @Suppress("unused") // Called via JNI before its native counterpart closes the descriptor.
+  private fun closeFd(isVerboseLog: Boolean) {
+    if (isVerboseLog) verboseFd = -1 else modulesFd = -1
   }
 }

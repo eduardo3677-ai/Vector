@@ -83,7 +83,6 @@ object VectorDaemon {
     SystemServerService.registerProxyService(proxyServiceName)
 
     // Start Environmental Daemons
-    LogcatMonitor.start()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) Dex2OatServer.start()
     CliSocketServer.start()
 
@@ -108,13 +107,10 @@ object VectorDaemon {
     // us during specialization, but when the injection fails nothing else has, and the daemon
     // used to die here on an unreadable preference.
     val isVerboseLog = ManagerService.isVerboseLogEnabled()
+    LogcatMonitor.start(isVerboseLog)
 
     // Setup IPC channel for applications by injecting DaemonService binder
     sendToBridge(VectorService.asBinder(), false, systemServerMaxRetry)
-
-    if (!isVerboseLog) {
-      LogcatMonitor.stopVerbose()
-    }
 
     Looper.loop()
     throw RuntimeException("Main thread loop unexpectedly exited")
