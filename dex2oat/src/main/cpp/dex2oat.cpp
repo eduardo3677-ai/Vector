@@ -122,6 +122,10 @@ int main(int argc, char **argv) {
 
     // 1. Get original dex2oat binary FD
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        PLOGE("failed to create dex2oat socket");
+        return 1;
+    }
     if (connect(sock_fd, reinterpret_cast<struct sockaddr *>(&sock), len)) {
         PLOGE("failed to connect to %s", sock.sun_path + 1);
         return 1;
@@ -133,9 +137,18 @@ int main(int argc, char **argv) {
     int stock_fd = recv_fd(sock_fd);
     read_int(sock_fd);  // Sync
     close(sock_fd);
+    if (stock_fd < 0) {
+        LOGE("failed to read original dex2oat fd");
+        return 1;
+    }
 
     // 2. Get liboat_hook.so FD
     sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        PLOGE("failed to create hooker socket");
+        close(stock_fd);
+        return 1;
+    }
     if (connect(sock_fd, reinterpret_cast<struct sockaddr *>(&sock), len)) {
         PLOGE("failed to connect to %s", sock.sun_path + 1);
         return 1;
@@ -148,6 +161,8 @@ int main(int argc, char **argv) {
 
     if (hooker_fd == -1) {
         LOGE("failed to read liboat_hook.so");
+        close(stock_fd);
+        return 1;
     } else {
         int mem_fd = syscall(__NR_memfd_create, "liboat_hook_memfd", 0);
         if (mem_fd >= 0) {

@@ -148,9 +148,27 @@ object Dex2OatServer {
 
   private fun openDex2oat(id: Int, path: String) {
     runCatching {
-      fdArray[id] = Os.open(path, OsConstants.O_RDONLY, 0)
-      dex2oatArray[id] = path
-    }
+          Os.open(path, OsConstants.O_RDONLY, 0)
+        }
+        .onSuccess { fd ->
+          fdArray[id] = fd
+          dex2oatArray[id] = path
+        }
+        .onFailure { Log.w(TAG, "Could not open $path", it) }
+  }
+
+  private fun isHookerMissing(): Boolean {
+    val needs32BitHooker = dex2oatArray[0] != null || dex2oatArray[1] != null
+    val needs64BitHooker = dex2oatArray[2] != null || dex2oatArray[3] != null
+    return (needs32BitHooker && fdArray[4] == null) || (needs64BitHooker && fdArray[5] == null)
+  }
+
+  private fun canServe(id: Int): Boolean = id in fdArray.indices && fdArray[id] != null
+
+  private fun sendFdOrFailure(client: android.net.LocalSocket, id: Int) {
+    val output = client.outputStream
+    if (canServe(id)) client.setFileDescriptorsForSend(arrayOf(fdArray[id]!!))
+    output.write(1) // Always wake the client, including when no descriptor is available.
   }
 
   private fun checkAndAddDex2Oat(path: String) {
@@ -180,13 +198,14 @@ object Dex2OatServer {
                 }
 
             if (index != -1 && dex2oatArray[index] == null) {
+              val fd = Os.open(path, OsConstants.O_RDONLY, 0)
+              fdArray[index] = fd
               dex2oatArray[index] = path
-              fdArray[index] = Os.open(path, OsConstants.O_RDONLY, 0)
               Log.i(TAG, "Detected $path -> Assigned Index $index")
             }
           }
         }
-        .onFailure { dex2oatArray[dex2oatArray.indexOf(path)] = null }
+        .onFailure { Log.w(TAG, "Could not inspect dex2oat at $path", it) }
   }
 
   private fun notMounted(): Boolean {
@@ -213,6 +232,13 @@ object Dex2OatServer {
     // The native library was historically loaded as a side effect of LogcatMonitor initialization.
     // Verbose-log startup is now deferred, so load it explicitly before the first JNI call here.
     ensureDaemonNativeLibraryLoaded()
+
+    if (isHookerMissing()) {
+      Log.e(TAG, "Dex2oat hook library is unavailable; leaving wrappers disabled")
+      doMount(false)
+      compatibility = DEX2OAT_MOUNT_FAILED
+      return
+    }
 
     if (notMounted()) {
       doMount(true)
@@ -261,12 +287,8 @@ object Dex2OatServer {
               // This blocks until the C++ wrapper connects
               server.accept().use { client ->
                 val input = client.inputStream
-                val output = client.outputStream
                 val id = input.read()
-                if (id in fdArray.indices && fdArray[id] != null) {
-                  client.setFileDescriptorsForSend(arrayOf(fdArray[id]!!))
-                  output.write(1)
-                }
+                sendFdOrFailure(client, id)
               }
             }
           } finally {

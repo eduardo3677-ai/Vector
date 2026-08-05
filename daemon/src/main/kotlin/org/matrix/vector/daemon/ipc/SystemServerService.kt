@@ -87,13 +87,6 @@ object SystemServerService : Binder(), IBinder.DeathRecipient {
   }
 
   override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-    originService?.let {
-      // This is unlikely to happen unless system_server restarts / crashes, since we intentionally
-      // discard our proxy upon later replacements in registerProxyService.
-      Log.d(TAG, "Forwarding request to real `$proxyServiceName` service.")
-      return it.transact(code, data, reply, flags)
-    }
-
     when (code) {
       BRIDGE_TRANSACTION_CODE -> {
         val uid = data.readInt()
@@ -113,10 +106,16 @@ object SystemServerService : Binder(), IBinder.DeathRecipient {
       OBFUSCATION_MAP_TRANSACTION_CODE -> {
         return FrameworkService.onTransact(code, data, reply, flags)
       }
-      else -> {
-        return super.onTransact(code, data, reply, flags)
-      }
     }
+
+    originService?.let {
+      // Keep Vector's private transactions above: the real service cannot handle their parcel
+      // format when it replaces this proxy during a system_server restart.
+      Log.d(TAG, "Forwarding request to real `$proxyServiceName` service.")
+      return it.transact(code, data, reply, flags)
+    }
+
+    return super.onTransact(code, data, reply, flags)
   }
 
   override fun binderDied() {

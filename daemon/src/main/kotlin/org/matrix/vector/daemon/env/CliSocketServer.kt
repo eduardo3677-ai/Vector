@@ -104,14 +104,12 @@ object CliSocketServer {
           output.writeUTF(VectorIPC.gson.toJson(response))
 
           // Open file and get raw FileDescriptor
-          val fis = FileInputStream(logFile)
-          val fd = fis.fd
+          FileInputStream(logFile).use { fis ->
+            // Attach FD to the next write operation while the stream still owns it.
+            socket.setFileDescriptorsForSend(arrayOf(fis.fd))
+            output.write(1) // Trigger byte to "carry" the ancillary FD data
+          }
 
-          // Attach FD to the next write operation
-          socket.setFileDescriptorsForSend(arrayOf(fd))
-          output.write(1) // Trigger byte to "carry" the ancillary FD data
-
-          // fis is closed when the socket/method finishes
           return
         } else {
           output.writeUTF(

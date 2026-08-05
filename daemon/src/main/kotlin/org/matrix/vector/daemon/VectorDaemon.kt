@@ -152,7 +152,7 @@ object VectorDaemon {
               object : IBinder.DeathRecipient {
                 override fun binderDied() {
                   Log.w(TAG, "System Server died! Clearing caches and re-injecting...")
-                  bridgeService.unlinkToDeath(this, 0)
+                  runCatching { bridgeService.unlinkToDeath(this, 0) }
                   clearSystemCaches()
                   SystemServerService.binderDied() // Cleanup old references
                   // Re-claim the service name immediately to ensure that when system_server
@@ -160,7 +160,8 @@ object VectorDaemon {
                   ServiceManager.addService(proxyServiceName, SystemServerService)
                   ManagerService.guard = null // Remove dead guard
                   Handler(Looper.getMainLooper()).post {
-                    sendToBridge(binder, true, restartRetry - 1)
+                    if (restartRetry > 0) sendToBridge(binder, true, restartRetry - 1)
+                    else restartSystemServer()
                   }
                 }
               }
@@ -192,7 +193,15 @@ object VectorDaemon {
             if (restartRetry > 0) restartSystemServer()
           }
         }
-        .onFailure { Log.e(TAG, "Error during injecting DaemonService", it) }
+        .onFailure {
+          Log.e(TAG, "Error during injecting DaemonService", it)
+          Handler(Looper.getMainLooper()).postDelayed(
+              {
+                if (restartRetry > 0) sendToBridge(binder, true, restartRetry - 1)
+                else restartSystemServer()
+              },
+              1000L)
+        }
     Os.seteuid(1000)
   }
 
