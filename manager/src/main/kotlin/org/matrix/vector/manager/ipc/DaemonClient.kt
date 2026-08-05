@@ -1,8 +1,10 @@
 package org.matrix.vector.manager.ipc
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.matrix.vector.ipc.IFrameworkInstallReceiver
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -40,6 +42,10 @@ class DaemonClient(private val serviceState: StateFlow<IManagerService?>) {
             }
             try {
                 Result.success(block(binder))
+            } catch (e: CancellationException) {
+                // A timeout must cancel the caller, not become an ordinary failed IPC result that
+                // leaves the UI waiting for a Binder transaction that can no longer be observed.
+                throw e
             } catch (e: Exception) {
                 // Deliberately broad. A SecurityException, an IllegalArgumentException, or a
                 // RuntimeException thrown while unparcelling a large ParcelableListSlice are all
@@ -49,6 +55,17 @@ class DaemonClient(private val serviceState: StateFlow<IManagerService?>) {
                 Result.failure(e)
             }
         }
+
+    /**
+     * Configuration writes must reach a terminal UI state even if a daemon Binder thread wedges.
+     *
+     * Cancelling a Binder transact cannot force the remote side to stop, but it does release the
+     * caller and discards a late reply, allowing the screen to report a failure rather than wait
+     * forever.
+     */
+    private suspend fun <T> runMutation(block: (IManagerService) -> T): Result<T> =
+        withTimeoutOrNull(MODULE_MUTATION_TIMEOUT_MS) { runIpc(block) }
+            ?: Result.failure(IllegalStateException("Daemon did not finish the configuration update"))
 
     suspend fun getLibxposedApiVersion(): Result<Int> = runIpc { it.libxposedApiVersion }
 
@@ -167,7 +184,7 @@ class DaemonClient(private val serviceState: StateFlow<IManagerService?>) {
         service.moduleLoadFailures.associate { it.packageName to it.reason }
     }
 
-    suspend fun setModuleEnabled(packageName: String, enable: Boolean): Result<Boolean> = runIpc {
+    suspend fun setModuleEnabled(packageName: String, enable: Boolean): Result<Boolean> = runMutation {
         it.setModuleEnabled(packageName, enable)
     }
 
@@ -186,7 +203,7 @@ class DaemonClient(private val serviceState: StateFlow<IManagerService?>) {
     suspend fun setModuleScope(
         packageName: String,
         applications: List<org.matrix.vector.ipc.ScopeEntry>,
-    ): Result<Boolean> = runIpc { it.setModuleScope(packageName, applications) }
+    ): Result<Boolean> = runMutation { it.setModuleScope(packageName, applications) }
 
     /**
      * A module's configured scope.
@@ -368,6 +385,8 @@ class DaemonClient(private val serviceState: StateFlow<IManagerService?>) {
  * An activity carrying it displays whichever user is current, so opening it needs no user switch.
  */
 private const val FLAG_SHOW_FOR_ALL_USERS = 0x0400
+
+private const val MODULE_MUTATION_TIMEOUT_MS = 10_000L
 
 /**
  * How an Xposed module has advertised its settings screen since the original framework.

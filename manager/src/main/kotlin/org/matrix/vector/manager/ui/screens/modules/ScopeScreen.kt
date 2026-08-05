@@ -297,6 +297,7 @@ fun ScopeScreen(
                     // list it acts on.
                     Switch(
                         checked = state.isEnabled,
+                        enabled = !applying,
                         onCheckedChange = { enable ->
                             haptics.performHapticFeedback(
                                 if (enable) HapticFeedbackType.ToggleOn

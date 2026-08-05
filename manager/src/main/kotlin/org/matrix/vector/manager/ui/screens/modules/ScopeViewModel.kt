@@ -224,6 +224,18 @@ class ScopeViewModel(
     private val _applying = MutableStateFlow(false)
     val applying: StateFlow<Boolean> = _applying.asStateFlow()
 
+    private fun runMutation(block: suspend () -> Unit) {
+        if (_applying.value) return
+        _applying.value = true
+        viewModelScope.launch {
+            try {
+                block()
+            } finally {
+                _applying.value = false
+            }
+        }
+    }
+
     private val _message = MutableStateFlow<ScopeMessage?>(null)
     val message: StateFlow<ScopeMessage?> = _message.asStateFlow()
 
@@ -776,7 +788,7 @@ class ScopeViewModel(
     }
 
     fun setModuleEnabled(enabled: Boolean) {
-        viewModelScope.launch {
+        runMutation {
             if (moduleRepository.toggleModule(modulePackageName, enabled)) {
                 _uiState.value = _uiState.value.copy(isEnabled = enabled)
             } else {
@@ -808,9 +820,7 @@ class ScopeViewModel(
      * The daemon enables the module as a side effect of storing a scope.
      */
     fun apply() {
-        if (_applying.value) return
-        viewModelScope.launch {
-            _applying.value = true
+        runMutation {
             // The snapshot the draft was built from, so the difference between the two is exactly
             // what was done on this screen and nothing else.
             val baseline = savedScope.value.asStored()
@@ -855,11 +865,13 @@ class ScopeViewModel(
                         // in the saved set but not the draft — the apply bar would come straight
                         // back up offering to remove it.
                         draftScope.value = merged
-                        // Storing a scope enables the module, so applying one to a disabled
-                        // module would leave the switch here and the row in the module list
-                        // both saying it is off. Followed through the switch's own path, so
-                        // the enabled set keeps a single keeper.
-                        if (!_uiState.value.isEnabled) setModuleEnabled(true)
+                        // Storing a scope enables the module in the same daemon transaction.
+                        // Record that committed state locally instead of launching a second enable
+                        // request that could overwrite a concurrent disable.
+                        if (!_uiState.value.isEnabled) {
+                            _uiState.value = _uiState.value.copy(isEnabled = true)
+                            moduleRepository.noteModuleEnabled(modulePackageName, true)
+                        }
                         _message.value = ScopeMessage.Applied
                         // system_server reads its module list once, when it starts:
                         // SystemServerService hands the zygisk module whatever
@@ -880,7 +892,6 @@ class ScopeViewModel(
                     logE("scope: apply of ${merged.size} targets to $modulePackageName failed", e)
                     _message.value = ScopeMessage.ApplyFailed
                 }
-            _applying.value = false
         }
     }
 

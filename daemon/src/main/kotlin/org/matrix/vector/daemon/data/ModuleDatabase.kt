@@ -3,6 +3,8 @@ package org.matrix.vector.daemon.data
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import kotlinx.coroutines.launch
+import org.matrix.vector.daemon.VectorDaemon
 import org.matrix.vector.ipc.ScopeEntry
 import org.matrix.vector.daemon.system.NotificationManager
 
@@ -186,58 +188,49 @@ object ModuleDatabase {
     return names.toTypedArray()
   }
 
+  private fun enableModule(db: SQLiteDatabase, packageName: String): Long? {
+    if (packageName == "lspd") return null
+
+    val inserted =
+        db.insertWithOnConflict(
+            "modules",
+            null,
+            ContentValues().apply {
+              put("module_pkg_name", packageName)
+              put("apk_path", "") // defer to cache updating
+              put("enabled", 1)
+            },
+            SQLiteDatabase.CONFLICT_IGNORE)
+    if (inserted != -1L) return inserted
+
+    if (
+        db.update(
+            "modules",
+            ContentValues().apply { put("enabled", 1) },
+            "module_pkg_name = ?",
+            arrayOf(packageName)) == 0
+    ) {
+      return null
+    }
+    return db
+        .query("modules", arrayOf("mid"), "module_pkg_name = ?", arrayOf(packageName), null, null, null)
+        .use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+  }
+
+  private fun cancelStaleActivationNotice(packageName: String) {
+    // NotificationManager is another Binder service. Configuration was committed already, so its
+    // best-effort cleanup must not keep a manager switch or scope save pending.
+    VectorDaemon.scope.launch { NotificationManager.cancelModuleUpdated(packageName) }
+  }
+
   fun enableModule(packageName: String): Boolean {
-    if (packageName == "lspd") return false
-    val db = dbHelper.writableDatabase
-    var changed = false
+    val enabled = enableModule(dbHelper.writableDatabase, packageName) != null
 
-    // First, check if it exists. If not, we need to "discover" it.
-    val exists =
-        db.compileStatement("SELECT COUNT(*) FROM modules WHERE module_pkg_name = ?")
-            .apply { bindString(1, packageName) }
-            .simpleQueryForLong() > 0
-    if (!exists) {
-      val values =
-          ContentValues().apply {
-            put("module_pkg_name", packageName)
-            put("apk_path", "") // defer to cache updating
-            put("enabled", 1)
-          }
-      // `insert` answers -1 rather than throwing: it catches the SQLException itself and logs one
-      // line. Taking that for granted reported a write that never landed as a success, and the
-      // caller acted on it — the manager left its switch on, and the shade's "not activated yet"
-      // notice was cancelled for a module the database had no row for.
-      changed = db.insert("modules", null, values) != -1L
-    } else {
-      val values = ContentValues().apply { put("enabled", 1) }
-      changed = db.update("modules", values, "module_pkg_name = ?", arrayOf(packageName)) > 0
-    }
-
-    if (changed) {
+    if (enabled) {
       ConfigCache.requestCacheUpdate()
-      // The shade may be telling the user this module "is not activated yet". It has just been
-      // activated, and nothing else was ever going to take that notice down: it is only marked
-      // auto-cancel, which fires when it is tapped, and the sole cancel path belonged to the scope
-      // prompt. The manager cannot do it either — the AIDL exposes no cancel, and a parasitic
-      // manager could not cancel a notification posted as "android" in any case.
-      //
-      // It lives here, at the data layer, rather than in ManagerService because this function is
-      // where the activations that go through the module table converge: the manager's toggle
-      // (ManagerService.enableModule), the socket CLI's `modules enable`, a manager backup restore
-      // — which replays what it read one setModuleEnabled at a time — and setModuleScope's
-      // implicit enable below. Putting it one level up would cover the manager alone and leave the
-      // other three lying to the user. Reaching out of the database for it is the same reach
-      // requestCacheUpdate() above already makes, and for the same reason — a row changed, and
-      // something outside has to be told.
-      //
-      // Not *every* activation, though, and the exception is worth knowing: the socket CLI's
-      // `db restore` copies a whole database file over the live one and calls nothing here, so a
-      // module the restored file has enabled keeps a stale "not activated yet" notice in the shade
-      // until something touches it again. That is a root-shell command that replaces the
-      // configuration wholesale, and the notice is one of several things it does not reconcile.
-      NotificationManager.cancelModuleUpdated(packageName)
+      cancelStaleActivationNotice(packageName)
     }
-    return changed
+    return enabled
   }
 
   fun disableModule(packageName: String): Boolean {
@@ -260,14 +253,11 @@ object ModuleDatabase {
         return false
       }
     }
-    enableModule(packageName)
     val db = dbHelper.writableDatabase
+    var stored = false
     db.beginTransaction()
     try {
-      val mid =
-          db.compileStatement("SELECT mid FROM modules WHERE module_pkg_name = ?")
-              .apply { bindString(1, packageName) }
-              .simpleQueryForLong()
+      val mid = enableModule(db, packageName) ?: return false
       db.delete("scope", "mid = ?", arrayOf(mid.toString()))
 
       val values = ContentValues().apply { put("mid", mid) }
@@ -293,13 +283,15 @@ object ModuleDatabase {
         db.insertWithOnConflict("scope", null, values, SQLiteDatabase.CONFLICT_IGNORE)
       }
       db.setTransactionSuccessful()
+      stored = true
     } catch (e: Exception) {
       Log.e(TAG, "Failed to set scope", e)
-      return false
     } finally {
       db.endTransaction()
     }
+    if (!stored) return false
     ConfigCache.requestCacheUpdate()
+    cancelStaleActivationNotice(packageName)
     return true
   }
 

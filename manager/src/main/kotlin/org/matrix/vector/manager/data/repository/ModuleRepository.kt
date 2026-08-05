@@ -43,6 +43,13 @@ class ModuleRepository(
         _scopeRevision.update { it + 1 }
     }
 
+    /** Records an enablement change already committed by another daemon operation. */
+    fun noteModuleEnabled(packageName: String, enabled: Boolean) {
+        _enabledModulesState.update { current ->
+            if (enabled) current + packageName else current - packageName
+        }
+    }
+
     private val _packageRevision = MutableStateFlow(0)
 
     /**
@@ -101,9 +108,7 @@ class ModuleRepository(
             return false
         }
 
-        _enabledModulesState.update { current ->
-            if (enable) current + packageName else current - packageName
-        }
+        noteModuleEnabled(packageName, enable)
         return true
     }
 }
