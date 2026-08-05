@@ -205,8 +205,12 @@ void VectorModule::SetupEntryClass(JNIEnv *env) {
 
     // Use the obfuscation map from the config to get the real class name.
     const auto &obfs_map = ConfigBridge::GetInstance()->obfuscation_map();
-    std::string entry_class_name;
-    entry_class_name = obfs_map.at("org.matrix.vector.core.") + "Main";
+    auto entry_prefix = obfs_map.find("org.matrix.vector.core.");
+    if (entry_prefix == obfs_map.end()) {
+        LOGE("Cannot setup entry class: obfuscation map has no core prefix.");
+        return;
+    }
+    std::string entry_class_name = entry_prefix->second + "Main";
 
     // We must find the class through our custom ClassLoader.
     auto entry_class = this->FindClassFromLoader(env, inject_class_loader_, entry_class_name);
@@ -245,7 +249,16 @@ void VectorModule::preAppSpecialize(zygisk::AppSpecializeArgs *args) {
             is_manager_app_ = true;
 
             // Add GID_INET to the GID list.
-            int original_gids_count = env_->GetArrayLength(args->gids);
+            if (!args->gids) {
+                LOGE("Manager app has no GID array; cannot grant internet access.");
+                return;
+            }
+            const jsize original_gids_count = env_->GetArrayLength(args->gids);
+            if (env_->ExceptionCheck()) {
+                LOGE("Failed to read the manager GID array length.");
+                env_->ExceptionClear();
+                return;
+            }
             jintArray new_gids = env_->NewIntArray(original_gids_count + 1);
             if (env_->ExceptionCheck()) {
                 LOGE("Failed to create new GID array for manager.");
@@ -253,12 +266,36 @@ void VectorModule::preAppSpecialize(zygisk::AppSpecializeArgs *args) {
                 return;
             }
 
-            jint *gids_array = env_->GetIntArrayElements(args->gids, nullptr);
-            env_->SetIntArrayRegion(new_gids, 0, original_gids_count, gids_array);
-            env_->ReleaseIntArrayElements(args->gids, gids_array, JNI_ABORT);
+            if (original_gids_count > 0) {
+                jint *gids_array = env_->GetIntArrayElements(args->gids, nullptr);
+                if (!gids_array) {
+                    LOGE("Failed to read the manager GID array.");
+                    if (env_->ExceptionCheck()) env_->ExceptionClear();
+                    return;
+                }
+                env_->SetIntArrayRegion(new_gids, 0, original_gids_count, gids_array);
+                env_->ReleaseIntArrayElements(args->gids, gids_array, JNI_ABORT);
+                if (env_->ExceptionCheck()) {
+                    LOGE("Failed to copy the manager GID array.");
+                    env_->ExceptionClear();
+                    return;
+                }
+            }
 
             jint inet_gid = GID_INET;
             env_->SetIntArrayRegion(new_gids, original_gids_count, 1, &inet_gid);
+            if (env_->ExceptionCheck()) {
+                LOGE("Failed to add GID_INET for the manager app.");
+                env_->ExceptionClear();
+                return;
+            }
+
+            auto injected_name = env_->NewStringUTF(INJECTED_PACKAGE_NAME);
+            if (!injected_name) {
+                LOGE("Failed to create the manager process name.");
+                if (env_->ExceptionCheck()) env_->ExceptionClear();
+                return;
+            }
 
             // The new array is only seen by the native specialization, which calls setgroups().
             // Once it returns, Zygote#forkAndSpecialize keeps using the array it passed in:
@@ -272,9 +309,14 @@ void VectorModule::preAppSpecialize(zygisk::AppSpecializeArgs *args) {
             // has no further use once specialization is done.
             if (original_gids_count > 0) {
                 env_->SetIntArrayRegion(args->gids, 0, 1, &inet_gid);
+                if (env_->ExceptionCheck()) {
+                    LOGE("Failed to update the manager's original GID array.");
+                    env_->ExceptionClear();
+                    return;
+                }
             }
 
-            args->nice_name = env_->NewStringUTF(INJECTED_PACKAGE_NAME);
+            args->nice_name = injected_name;
             args->gids = new_gids;
         }
     }
@@ -345,6 +387,12 @@ void VectorModule::postAppSpecialize(const zygisk::AppSpecializeArgs *args) {
     }
 
     auto obfs_map = ipc_bridge.FetchObfuscationMap(env_, binder.get());
+    if (!obfs_map.contains("org.matrix.vector.core.")) {
+        LOGE("Framework obfuscation map is missing the core prefix for '{}'.", nice_name_str.get());
+        close(dex_fd);
+        SetAllowUnload(true);
+        return;
+    }
     ConfigBridge::GetInstance()->obfuscation_map(std::move(obfs_map));
 
     {
@@ -352,6 +400,11 @@ void VectorModule::postAppSpecialize(const zygisk::AppSpecializeArgs *args) {
         this->LoadDex(env_, std::move(dex));
     }
     close(dex_fd);  // The FD is duplicated by mmap, we can close it now.
+    if (!GetCurrentClassLoader()) {
+        LOGE("Failed to load framework DEX for '{}'.", nice_name_str.get());
+        SetAllowUnload(true);
+        return;
+    }
 
     // Initialize ART hooks via the native library.
     this->InitArtHooker(env_, init_info_);
@@ -440,6 +493,13 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
     }
 
     auto obfs_map = ipc_bridge.FetchObfuscationMap(env_, effective_binder);
+    if (!obfs_map.contains("org.matrix.vector.core.") ||
+        !obfs_map.contains("org.matrix.vector.service.")) {
+        LOGE("Framework obfuscation map is incomplete for system_server.");
+        close(dex_fd);
+        SetAllowUnload(true);
+        return;
+    }
     ConfigBridge::GetInstance()->obfuscation_map(std::move(obfs_map));
 
     {
@@ -447,6 +507,11 @@ void VectorModule::postServerSpecialize(const zygisk::ServerSpecializeArgs *args
         this->LoadDex(env_, std::move(dex));
     }
     close(dex_fd);
+    if (!GetCurrentClassLoader()) {
+        LOGE("Failed to load framework DEX for system_server.");
+        SetAllowUnload(true);
+        return;
+    }
 
     ipc_bridge.HookBridge(env_);
 
