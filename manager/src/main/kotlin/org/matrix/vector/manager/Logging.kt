@@ -26,10 +26,9 @@ import java.io.StringWriter
  *
  * The conventions the tag used to carry:
  *
- * `logcat.cpp` routes any tag beginning `Vector` into the daemon's **verbose** stream, so with
- * verbose logging on everything logged here appears in the Verbose tab beside the daemon's own
- * lines and travels in the zip export — the place a reader already looks. A file-local tag would be
- * ordinary Android practice and would land nowhere; there are none in this app.
+ * `logcat.cpp` routes any tag beginning `Vector` into the daemon's **verbose** stream and keeps its
+ * errors in the modules log even when verbose logging is off. A file-local tag would be ordinary
+ * Android practice and would land nowhere; there are none in this app.
  *
  * A message is `area: lowercase phrase naming the operation and its subject`, where the area is one
  * of ipc, dns, apps, modules, backup, restore, scope, store, update, feed, status, framework, logs,

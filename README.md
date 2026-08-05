@@ -26,7 +26,8 @@ The framework allows modules to modify system and application behavior in-memory
 Vector supports devices running **Android 8.1 through Android 17 Beta**.
 
 > [!TIP]
-> This framework requires a recent installation of Magisk or KernelSU with Zygisk enabled.
+> This framework requires a current Zygisk provider, such as Magisk, KernelSU, APatch,
+> [ReZygisk](https://github.com/PerformanC/ReZygisk), or NeoZygisk.
 
 ---
 
@@ -34,7 +35,8 @@ Vector supports devices running **Android 8.1 through Android 17 Beta**.
 
 1. Download the latest release as a system module.
 2. Install the module via your root manager (Magisk/KernelSU).
-3. Ensure a Zygisk environment (e.g., [NeoZygisk](https://github.com/JingMatrix/NeoZygisk)).
+3. Ensure a Zygisk environment (e.g., [ReZygisk](https://github.com/PerformanC/ReZygisk) or
+   [NeoZygisk](https://github.com/JingMatrix/NeoZygisk)).
 4. Reboot the device.
 5. Access management settings via the system notification.
 

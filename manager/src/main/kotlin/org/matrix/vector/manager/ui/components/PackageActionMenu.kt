@@ -573,6 +573,7 @@ private fun ModuleUpdateSection(
         }
     val apks = release?.releaseAssets.orEmpty().filter { it.isApk }
     var confirming by remember { mutableStateOf<ReleaseAsset?>(null) }
+    var choosing by remember { mutableStateOf(false) }
 
     if (outdated) {
         val busy = queue.running && (queue.current?.packageName == packageName)
@@ -588,9 +589,8 @@ private fun ModuleUpdateSection(
                 when {
                     busy -> stringResource(R.string.action_update_running)
                     apks.isEmpty() -> stringResource(R.string.action_update_no_apk)
-                    // Several APKs is an architecture split or a variant, and choosing between
-                    // them needs the names and sizes the store page already lays out. Sending the
-                    // reader there is better than picking one on their behalf.
+                    // Several APKs are variants or splits. The reader chooses one here instead of
+                    // being sent out to another screen or an external browser.
                     apks.size > 1 -> stringResource(R.string.action_update_choose)
                     // The title already names the version; saying "from 1.1.1" under "Reinstall
                     // 1.1.1" would only invite the reader to look for the difference.
@@ -610,10 +610,7 @@ private fun ModuleUpdateSection(
             onClick = {
                 when {
                     busy || apks.isEmpty() -> Unit
-                    apks.size > 1 -> {
-                        onDismiss()
-                        onOpenStore?.invoke(packageName)
-                    }
+                    apks.size > 1 -> choosing = true
                     else -> confirming = apks.first()
                 }
             },
@@ -642,6 +639,17 @@ private fun ModuleUpdateSection(
 
     HorizontalDivider(Modifier.padding(horizontal = 24.dp))
     Spacer(Modifier.height(4.dp))
+
+    if (choosing) {
+        ReleaseAssetPicker(
+            assets = apks,
+            onDismiss = { choosing = false },
+            onPick = { asset ->
+                choosing = false
+                confirming = asset
+            },
+        )
+    }
 
     confirming?.let { asset ->
         ConfirmInstall(

@@ -3,6 +3,7 @@
 #include <android/log.h>
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <array>
 
 /**
@@ -71,7 +72,8 @@ inline void LogToAndroid(int prio, const char *tag, fmt::format_string<T...> fmt
     std::array<char, 1024> buf{};
     // format_to_n is safe against buffer overflows.
     auto result = fmt::format_to_n(buf.data(), buf.size() - 1, fmt, std::forward<T>(args)...);
-    buf[result.size] = '\0';
+    // result.size is the size requested, not necessarily the size written to our fixed buffer.
+    buf[std::min(result.size, buf.size() - 1)] = '\0';
     __android_log_write(prio, tag, buf.data());
 }
 }  // namespace vector::native::detail

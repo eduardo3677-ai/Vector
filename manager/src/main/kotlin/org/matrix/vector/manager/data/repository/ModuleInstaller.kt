@@ -10,7 +10,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.matrix.vector.manager.data.model.ReleaseAsset
@@ -21,19 +24,25 @@ import org.matrix.vector.manager.logW
 /** Where an install has got to. One at a time, because a user installs one module at a time. */
 sealed interface InstallStep {
 
-    data object Idle : InstallStep
+    /** The package this state belongs to, if an install has been started. */
+    val packageName: String?
 
-    data class Downloading(val packageName: String, val bytes: Long, val total: Long) : InstallStep
+    data object Idle : InstallStep {
+        override val packageName: String? = null
+    }
+
+    data class Downloading(override val packageName: String, val bytes: Long, val total: Long) :
+        InstallStep
 
     /** Handed to the package installer; nothing more to report until it answers. */
-    data class Installing(val packageName: String) : InstallStep
+    data class Installing(override val packageName: String) : InstallStep
 
     /** Standalone only: the system's own install prompt is up and waiting on the user. */
-    data class Confirming(val packageName: String) : InstallStep
+    data class Confirming(override val packageName: String) : InstallStep
 
-    data class Done(val packageName: String) : InstallStep
+    data class Done(override val packageName: String) : InstallStep
 
-    data class Failed(val packageName: String, val reason: String?) : InstallStep
+    data class Failed(override val packageName: String, val reason: String?) : InstallStep
 }
 
 /**
@@ -59,12 +68,16 @@ sealed interface InstallStep {
  */
 class ModuleInstaller(private val context: Context, private val client: OkHttpClient) {
 
+    // A standalone install prompt cannot sensibly be shown concurrently with another one.
+    private val installs = Mutex()
     private val _state = MutableStateFlow<InstallStep>(InstallStep.Idle)
     val state: StateFlow<InstallStep> = _state.asStateFlow()
 
     /** Clears a finished result so the button returns to its resting state. */
-    fun acknowledge() {
-        _state.value = InstallStep.Idle
+    fun acknowledge(packageName: String? = null) {
+        if (packageName == null || _state.value.packageName == packageName) {
+            _state.value = InstallStep.Idle
+        }
     }
 
     /**
@@ -78,62 +91,65 @@ class ModuleInstaller(private val context: Context, private val client: OkHttpCl
      * and SettingsRepository.noteStoreInstall — because the version to record has to be read the way
      * the Store reads it, across every user, and this class talks to the platform rather than to the
      * daemon.
-     */
+    */
     suspend fun install(packageName: String, asset: ReleaseAsset): Boolean =
-        withContext(Dispatchers.IO) {
-            val url = asset.downloadUrl
-            if (url == null || !asset.isApk) {
-                _state.value = InstallStep.Failed(packageName, null)
-                return@withContext false
-            }
+        installs.withLock {
+            withContext(Dispatchers.IO) {
+                val url = asset.downloadUrl
+                if (url?.toHttpUrlOrNull()?.isHttps != true || !asset.isApk) {
+                    logW("store: rejected non-HTTPS APK URL for $packageName")
+                    _state.value = InstallStep.Failed(packageName, null)
+                    return@withContext false
+                }
 
-            val packageInstaller = context.packageManager.packageInstaller
-            var sessionId = -1
-            var succeeded = false
-            try {
-                _state.value = InstallStep.Downloading(packageName, 0, asset.size)
+                val packageInstaller = context.packageManager.packageInstaller
+                var sessionId = -1
+                var succeeded = false
+                try {
+                    _state.value = InstallStep.Downloading(packageName, 0, asset.size)
 
-                val params =
-                    PackageInstaller.SessionParams(
-                            PackageInstaller.SessionParams.MODE_FULL_INSTALL
-                        )
-                        .apply {
-                            setAppPackageName(packageName)
-                            if (asset.size > 0) setSize(asset.size)
-                            requestReplaceExisting()
+                    val params =
+                        PackageInstaller.SessionParams(
+                                PackageInstaller.SessionParams.MODE_FULL_INSTALL
+                            )
+                            .apply {
+                                setAppPackageName(packageName)
+                                if (asset.size > 0) setSize(asset.size)
+                                requestReplaceExisting()
+                            }
+                    sessionId = packageInstaller.createSession(params)
+
+                    packageInstaller.openSession(sessionId).use { session ->
+                        stream(session, packageName, url, asset.size)
+                        _state.value = InstallStep.Installing(packageName)
+                        val result = commit(session, sessionId, packageName)
+                        succeeded = result.first == PackageInstaller.STATUS_SUCCESS
+                        if (!succeeded) {
+                            logW(
+                                "store: install of $packageName failed, status ${result.first}: " +
+                                    "${result.second}"
+                            )
                         }
-                sessionId = packageInstaller.createSession(params)
-
-                packageInstaller.openSession(sessionId).use { session ->
-                    stream(session, packageName, url, asset.size)
-                    _state.value = InstallStep.Installing(packageName)
-                    val result = commit(session, sessionId, packageName)
-                    succeeded = result.first == PackageInstaller.STATUS_SUCCESS
-                    if (!succeeded) {
-                        logW(
-                            "store: install of $packageName failed, status ${result.first}: " +
-                                "${result.second}"
-                        )
+                        _state.value =
+                            if (succeeded) InstallStep.Done(packageName)
+                            else InstallStep.Failed(packageName, result.second)
                     }
-                    _state.value =
-                        if (succeeded) InstallStep.Done(packageName)
-                        else InstallStep.Failed(packageName, result.second)
+                } catch (e: Exception) {
+                    // The check in stream() cancels by throwing, and a cancelled transfer is not a
+                    // failed install: reporting it as one would put an error on a screen the reader
+                    // has already left, and would race the acknowledge() that cancelled it.
+                    if (e is CancellationException) throw e
+                    logW("store: install of $packageName failed", e)
+                    _state.value = InstallStep.Failed(packageName, e.message)
+                } finally {
+                    // Without this, a cancelled download leaves a staged session behind — and staged
+                    // sessions accumulate, each holding the bytes written so far.
+                    if (!succeeded && sessionId != -1) {
+                        runCatching { packageInstaller.abandonSession(sessionId) }
+                    }
                 }
-            } catch (e: Exception) {
-                // The check in stream() cancels by throwing, and a cancelled transfer is not a
-                // failed install: reporting it as one would put an error on a screen the reader
-                // has already left, and would race the acknowledge() that cancelled it.
-                if (e is CancellationException) throw e
-                logW("store: install of $packageName failed", e)
-                _state.value = InstallStep.Failed(packageName, e.message)
-            } finally {
-                // Without this, a cancelled download leaves a staged session behind — and staged
-                // sessions accumulate, each holding the bytes written so far.
-                if (!succeeded && sessionId != -1) {
-                    runCatching { packageInstaller.abandonSession(sessionId) }
-                }
+                succeeded
             }
-            succeeded
         }
 
     private suspend fun stream(
@@ -143,9 +159,18 @@ class ModuleInstaller(private val context: Context, private val client: OkHttpCl
         declaredSize: Long,
     ) {
         client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code} for $url")
+            if (!response.isSuccessful) {
+                throw IOException("HTTP ${response.code} downloading APK")
+            }
+            if (!response.request.url.isHttps) {
+                throw IOException("APK download redirected to an insecure URL")
+            }
             val body = response.body
-            val total = body.contentLength().takeIf { it > 0 } ?: declaredSize
+            val contentLength = body.contentLength()
+            if (declaredSize > 0 && contentLength > 0 && contentLength != declaredSize) {
+                throw IOException("APK download size does not match the release metadata")
+            }
+            val total = contentLength.takeIf { it > 0 } ?: declaredSize
 
             session.openWrite(WRITE_NAME, 0, total).use { out ->
                 body.byteStream().use { input ->
@@ -172,6 +197,9 @@ class ModuleInstaller(private val context: Context, private val client: OkHttpCl
                     }
                     out.flush()
                     session.fsync(out)
+                    if (declaredSize > 0 && written != declaredSize) {
+                        throw IOException("APK download size does not match the release metadata")
+                    }
                 }
             }
         }

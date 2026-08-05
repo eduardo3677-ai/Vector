@@ -74,8 +74,8 @@ enum class StoreChannel(val preference: String) {
  */
 internal fun OnlineModule.releasesOn(channel: StoreChannel): List<Release> {
     val published = releases.orEmpty().filter { it.isDraft != true }
+    val beta = betaReleases.orEmpty().filter { it.isDraft != true }
     if (channel == StoreChannel.Prerelease) {
-        val beta = betaReleases.orEmpty().filter { it.isDraft != true }
         if (beta.isEmpty()) return published
         return (published + beta)
             .distinctBy { it.tagName ?: it.id ?: it.name }
@@ -84,7 +84,7 @@ internal fun OnlineModule.releasesOn(channel: StoreChannel): List<Release> {
     // Defensive rather than load-bearing, and it stays because the mirror's shape is not ours to
     // promise: a module that has only ever prereleased still has releases worth listing.
     val stable = published.filter { it.isPrerelease != true }
-    return stable.ifEmpty { published }
+    return stable.ifEmpty { published.ifEmpty { beta } }
 }
 
 /**
@@ -95,6 +95,9 @@ internal fun OnlineModule.releasesOn(channel: StoreChannel): List<Release> {
  * downgrade from code 8 to code 1 and calls it an update.
  */
 internal fun OnlineModule.latestOn(channel: StoreChannel): RepoVersion? {
+    // Releases and the install action must agree. The payload's summary can be stale or omit a
+    // beta-only module, while the first channel release is the exact release the UI presents.
+    releasesOn(channel).firstOrNull()?.version?.let { return it }
     val stable = RepoVersion.parse(latestRelease)
     val best =
         if (channel == StoreChannel.Stable) stable

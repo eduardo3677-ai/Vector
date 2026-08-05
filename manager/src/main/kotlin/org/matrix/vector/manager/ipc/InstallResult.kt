@@ -73,7 +73,14 @@ suspend fun Context.commitForResult(
     onPrompt: () -> Unit = {},
 ): Pair<Int, String?> = suspendCancellableCoroutine { continuation ->
     val action = "$RESULT_ACTION.$sessionId.${UUID.randomUUID()}"
-    val receiver =
+    lateinit var receiver: BroadcastReceiver
+    fun complete(status: Int, message: String?) {
+        runCatching { unregisterReceiver(receiver) }
+        if (continuation.isActive) {
+            continuation.resumeWith(Result.success(status to message))
+        }
+    }
+    receiver =
         object : BroadcastReceiver() {
             override fun onReceive(received: Context, intent: Intent) {
                 if (intent.action != action) return
@@ -81,26 +88,29 @@ suspend fun Context.commitForResult(
                     intent.getIntExtra(
                         PackageInstaller.EXTRA_STATUS,
                         PackageInstaller.STATUS_FAILURE,
-                    )
+                )
                 if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
                     onPrompt()
-                    IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT, Intent::class.java)
-                        ?.let { confirm ->
-                            runCatching {
-                                    startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                                }
-                                .onFailure { logE(promptFailure, it) }
+                    val confirm =
+                        IntentCompat.getParcelableExtra(
+                            intent,
+                            Intent.EXTRA_INTENT,
+                            Intent::class.java,
+                        )
+                    if (confirm == null) {
+                        val message = "The system did not provide an install confirmation intent"
+                        logE(promptFailure, IllegalStateException(message))
+                        complete(PackageInstaller.STATUS_FAILURE, message)
+                        return
+                    }
+                    runCatching { startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        .onFailure {
+                            logE(promptFailure, it)
+                            complete(PackageInstaller.STATUS_FAILURE, it.message)
                         }
                     return
                 }
-                runCatching { unregisterReceiver(this) }
-                if (continuation.isActive) {
-                    continuation.resumeWith(
-                        Result.success(
-                            status to intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                        )
-                    )
-                }
+                complete(status, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
             }
         }
 
@@ -118,7 +128,11 @@ suspend fun Context.commitForResult(
     // this process, so a broadcast confined to the manager's own package would reach nobody.
     val pending =
         PendingIntent.getBroadcast(this, sessionId, Intent(action).setPackage(packageName), flags)
-    session.commit(pending.intentSender)
+    runCatching { session.commit(pending.intentSender) }
+        .onFailure {
+            logE("ipc: could not commit install session $sessionId", it)
+            complete(PackageInstaller.STATUS_FAILURE, it.message)
+        }
 }
 
 /** Only ever a prefix; the session id and a UUID follow. */

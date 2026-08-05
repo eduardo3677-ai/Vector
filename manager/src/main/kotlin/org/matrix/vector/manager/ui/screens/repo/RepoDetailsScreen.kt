@@ -2,9 +2,9 @@ package org.matrix.vector.manager.ui.screens.repo
 
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.matrix.vector.manager.ui.components.ConfirmInstall
+import org.matrix.vector.manager.ui.components.ReleaseAssetPicker
 import org.matrix.vector.manager.ui.components.ToggleRow
 import org.matrix.vector.manager.ui.components.SheetHeading
-import org.matrix.vector.manager.ui.components.sheetRowColors
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material.icons.rounded.Tune
@@ -346,8 +346,8 @@ fun RepoDetailsScreen(packageName: String, onNavigateBack: () -> Unit) {
     }
 
     choosing?.let { release ->
-        AssetSheet(
-            release = release,
+        ReleaseAssetPicker(
+            assets = release.apks,
             onDismiss = { choosing = null },
             onPick = { asset ->
                 choosing = null
@@ -384,7 +384,9 @@ private fun InstallBar(
     onAcknowledge: () -> Unit,
 ) {
     val context = LocalContext.current
-    val newest = state.releases.firstOrNull { it.apks.isNotEmpty() } ?: return
+    // Never offer "latest" while downloading an older release just because the newest has no APK.
+    // Older releases stay available from the Releases tab, where that choice is explicit.
+    val newest = state.releases.firstOrNull()?.takeIf { it.apks.isNotEmpty() } ?: return
 
     Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(
@@ -855,42 +857,6 @@ private fun InfoRow(
         leadingContent = { Icon(icon, contentDescription = null) },
     ) { Text(label) }
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-}
-
-/** Shown only when a release ships more than one APK — an architecture split, usually. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AssetSheet(release: Release, onDismiss: () -> Unit, onPick: (ReleaseAsset) -> Unit) {
-    val context = LocalContext.current
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-LocalizedOverlay {
-
-        Text(
-            text = stringResource(R.string.store_choose_asset),
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-        )
-        release.apks.forEach { asset ->
-            ListItem(
-                modifier = Modifier.clickable { onPick(asset) },
-                supportingContent = {
-                    val size = Formatter.formatShortFileSize(context, asset.size)
-                    val downloads =
-                        asset.downloadCount?.let {
-                            context.resources.getQuantityString(
-                                R.plurals.store_asset_downloads,
-                                it,
-                                it,
-                            )
-                        }
-                    Text(listOfNotNull(size, downloads).joinToString("  ·  "))
-                },
-                colors = sheetRowColors,
-            ) { Text(asset.name.orEmpty()) }
-        }
-        Spacer(Modifier.navigationBarsPadding().height(16.dp))
-    }
-}
 }
 
 /**

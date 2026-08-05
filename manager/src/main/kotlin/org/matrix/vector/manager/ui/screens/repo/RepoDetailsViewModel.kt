@@ -116,7 +116,11 @@ class RepoDetailsViewModel(
     private val _detail = MutableStateFlow<OnlineModule?>(null)
     private val _fetch = MutableStateFlow(DetailFetch.Loading)
 
-    val installState: StateFlow<InstallStep> = installer.state
+    /** A shared installer must never render another module's progress or failure on this page. */
+    val installState: StateFlow<InstallStep> =
+        installer.state
+            .map { step -> if (step.packageName == packageName) step else InstallStep.Idle }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), InstallStep.Idle)
 
     /** Whether this module has been told to stop reporting updates. */
     val updatesMuted: StateFlow<Boolean> =
@@ -150,11 +154,12 @@ class RepoDetailsViewModel(
                 val seed = catalog.modules.firstOrNull { it.name == packageName }
                 val module = detail ?: seed
                 val channel = preferences.channel
+                val releases = releasesFor(module, channel)
                 RepoDetailsState(
                     module = module,
-                    releases = releasesFor(module, channel),
+                    releases = releases,
                     installed = installed[packageName],
-                    latest = latestFor(module, channel),
+                    latest = releases.firstOrNull()?.version ?: latestFor(module, channel),
                     fetch = fetch,
                     channel = channel,
                     storeInstall = preferences.storeInstall,
@@ -198,7 +203,7 @@ class RepoDetailsViewModel(
         }
     }
 
-    fun acknowledgeInstall() = installer.acknowledge()
+    fun acknowledgeInstall() = installer.acknowledge(packageName)
 
     /**
      * Which releases belong to the current channel.

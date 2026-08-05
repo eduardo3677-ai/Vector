@@ -179,7 +179,10 @@ void Logcat::ProcessBuffer(struct log_msg* buf) {
 
     // Check if tag is in the Module list
     bool is_module = std::binary_search(kModuleTags.begin(), kModuleTags.end(), tag);
-    if (is_module) {
+    // Verbose logging can be disabled, but a Vector error is diagnostic data and must survive in
+    // the modules log so an exported report still contains the failure that prompted it.
+    bool is_vector_error = tag.starts_with("Vector"sv) && entry.priority >= ANDROID_LOG_ERROR;
+    if (is_module || is_vector_error) {
         modules_written_ += FastWrite(entry, modules_fd_);
     }
 

@@ -279,14 +279,16 @@ class RepoRepository(
      *
      * `distinctBy` is not superstition about today's data — it is what stops a mirror serving the
      * same package twice from crashing the Store's `LazyColumn`, which is keyed by package name.
-     * Entries with no release at all are dropped because there is nothing to install and nothing to
-     * say about them.
+     * Entries with neither a stable nor a prerelease are dropped because there is nothing to install
+     * and nothing to say about them.
      */
     private fun usable(parsed: List<OnlineModule>): List<OnlineModule> =
         parsed
             .asSequence()
             .filter { it.hide != true }
-            .filter { !it.releases.isNullOrEmpty() }
+            // Beta-only modules are usable when the reader selects the prerelease channel. Hiding
+            // them here made that channel silently incomplete.
+            .filter { !it.releases.isNullOrEmpty() || !it.betaReleases.isNullOrEmpty() }
             .distinctBy { it.name }
             .toList()
 
