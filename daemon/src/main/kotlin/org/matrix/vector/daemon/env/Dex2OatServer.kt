@@ -210,6 +210,10 @@ object Dex2OatServer {
   }
 
   fun start() {
+    // The native library was historically loaded as a side effect of LogcatMonitor initialization.
+    // Verbose-log startup is now deferred, so load it explicitly before the first JNI call here.
+    ensureDaemonNativeLibraryLoaded()
+
     if (notMounted()) {
       doMount(true)
       if (notMounted()) {

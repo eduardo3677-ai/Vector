@@ -24,6 +24,21 @@ private const val FD_MODE =
         ParcelFileDescriptor.MODE_TRUNCATE or
         ParcelFileDescriptor.MODE_APPEND
 
+private val daemonNativeLibrary = lazy(::loadNativeLibrary)
+
+/** Loads the JNI library used by both the logcat and dex2oat daemons exactly once. */
+internal fun ensureDaemonNativeLibraryLoaded() {
+  daemonNativeLibrary.value
+}
+
+@SuppressLint("UnsafeDynamicallyLoadedCode")
+private fun loadNativeLibrary() {
+  val classPath = System.getProperty("java.class.path", "")
+  val abi =
+      if (Process.is64Bit()) Build.SUPPORTED_64_BIT_ABIS[0] else Build.SUPPORTED_32_BIT_ABIS[0]
+  System.load("$classPath!/lib/$abi/${System.mapLibraryName("daemon")}")
+}
+
 object LogcatMonitor {
   private var modulesFd = -1
   private var verboseFd = -1
@@ -51,7 +66,7 @@ object LogcatMonitor {
   private val verboseLogs = ThreadSafeLRU()
 
   init {
-    loadNativeLibrary()
+    ensureDaemonNativeLibraryLoaded()
     FileSystem.moveLogDir() // Defined in FileSystem
 
     // Meizu log_reject_level workaround
@@ -60,14 +75,6 @@ object LogcatMonitor {
     }
 
     dumpPropsAndDmesg()
-  }
-
-  @SuppressLint("UnsafeDynamicallyLoadedCode")
-  private fun loadNativeLibrary() {
-    val classPath = System.getProperty("java.class.path", "")
-    val abi =
-        if (Process.is64Bit()) Build.SUPPORTED_64_BIT_ABIS[0] else Build.SUPPORTED_32_BIT_ABIS[0]
-    System.load("$classPath!/lib/$abi/${System.mapLibraryName("daemon")}")
   }
 
   private fun dumpPropsAndDmesg() {
