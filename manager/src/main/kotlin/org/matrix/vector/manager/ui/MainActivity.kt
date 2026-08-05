@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import org.matrix.vector.manager.BuildConfig
 import org.matrix.vector.manager.data.repository.LaunchShortcut
 import org.matrix.vector.manager.di.ServiceLocator
 import org.matrix.vector.manager.ui.navigation.DeepLink
@@ -28,8 +29,19 @@ class MainActivity : ComponentActivity() {
         // unthemed frame from appearing between the system splash and the Compose one.
         val splash = installSplashScreen()
 
+        // The parasitic hooker keeps this bundle beyond the manager process. R8 can assign the
+        // same obfuscated name to a different type in the next build, making Android fail while
+        // unparceling a stale Compose value before this activity can install crash reporting.
+        val stateStore = getSharedPreferences("vector_manager_state", MODE_PRIVATE)
+        val compatibleState = if (stateStore.getString("build", null) == BuildConfig.VERSION_HASH) {
+            savedInstanceState
+        } else {
+            null
+        }
+        stateStore.edit().putString("build", BuildConfig.VERSION_HASH).apply()
+
         enableEdgeToEdge()
-        super.onCreate(savedInstanceState)
+        super.onCreate(compatibleState)
 
         // Idempotent, and safe whether or not the daemon already called Constants.setBinder.
         // Configures Coil, among the rest: it used to be done here, which left the debug demo host
